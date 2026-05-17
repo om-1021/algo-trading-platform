@@ -21,6 +21,69 @@ is noise — the strategy itself is the story.
 
 ---
 
+## 1.5 Strategy-centric invariants the harness must preserve
+
+The platform's central principle is that **every trade is classifiable by the
+strategy that produced it**, so any strategy (popular or homegrown,
+universe-wide or single-stock) can be backtested, compared against others,
+and analyzed for per-symbol fit. The walk-forward harness must not weaken
+that.
+
+These invariants are enforced and must continue to hold:
+
+1. **Every persisted trade has a `run_id`.** Trades without a strategy run
+   row are illegal — `swing_trades.run_id` is `NOT NULL`.
+2. **Every `run_id` resolves to `(strategy_name, strategy_version,
+   params_json)`** via `swing_strategy_runs`. No mystery trades.
+3. **A strategy's universe is the `instrument_keys` list passed to its
+   backtest call.** A strategy can run on all 51 symbols or on a single
+   symbol — both produce one `swing_strategy_runs` row. Per-stock strategies
+   are not a future feature; they're a supported usage pattern today.
+4. **Train-period trades from grid search are scaffolding, never persisted.**
+   Persisting them would let someone accidentally aggregate scoring trades
+   into "strategy performance," which is the kind of data hygiene failure
+   walk-forward exists to prevent.
+5. **Walk-forward folds add context, not new trade paths.**
+   `swing_walkforward_folds` exists to record *which window, which params,
+   which role* — every trade is still reachable via the existing
+   `swing_trades → swing_strategy_runs → strategy_name` chain.
+
+Queries the harness must keep enabling (sanity check during implementation):
+
+```sql
+-- "Show me every out-of-sample trade ever taken under ema_crossover
+--  on RELIANCE across all WFO studies."
+SELECT t.* FROM swing_trades t
+JOIN swing_strategy_runs r USING (run_id)
+JOIN instruments i USING (instrument_key)
+JOIN swing_walkforward_folds f ON f.test_run_id = t.run_id
+WHERE r.strategy_name = 'ema_crossover'
+  AND i.tradingsymbol  = 'RELIANCE'
+  AND f.role            = 'optimized';
+
+-- "Per-symbol net P&L under the optimized walk-forward of this strategy."
+SELECT i.tradingsymbol,
+       ROUND(SUM(t.net_pnl), 2) AS total_net,
+       COUNT(*)                  AS n_trades
+FROM swing_trades t
+JOIN swing_strategy_runs r USING (run_id)
+JOIN swing_walkforward_folds f ON f.test_run_id = t.run_id
+JOIN instruments i USING (instrument_key)
+WHERE f.wfo_id = '<wfo_uuid>' AND f.role = 'optimized'
+GROUP BY 1 ORDER BY 2 DESC;
+
+-- "Compare two strategies head-to-head on out-of-sample trades only."
+SELECT r.strategy_name,
+       COUNT(*) AS trades, ROUND(SUM(t.net_pnl), 2) AS total_net
+FROM swing_trades t
+JOIN swing_strategy_runs r USING (run_id)
+JOIN swing_walkforward_folds f ON f.test_run_id = t.run_id
+WHERE r.strategy_name IN ('ema_crossover', 'rsi_meanrev')
+GROUP BY 1;
+```
+
+---
+
 ## 2. What it does (the loop)
 
 Slides a `(train_window_days=252, test_window_days=63, step_days=63)` triple
@@ -284,19 +347,41 @@ Fold  Train range              Test range               Optimized              T
 Aggregate out-of-sample:
   Optimized   total ₹  45,210.18   win-rate 0.42   sharpe-per-trade 0.18
   Baseline    total ₹  31,002.10   win-rate 0.38   sharpe-per-trade 0.14
+
+Per-symbol out-of-sample (optimized role, sorted by net P&L):
+  Symbol         Trades      Net P&L    Avg/Trade
+  ----          ------    ----------    ---------
+  BEL                7   ₹  9,820.15   ₹ 1,402.88
+  SHRIRAMFIN         6   ₹  6,705.05   ₹ 1,117.51
+  ...
+  KOTAKBANK          8   ₹ -2,478.20   ₹  -309.78
 ```
 
-The honest narrative this table gives: did picking-the-best-on-train actually
-beat picking-once-forever? If "optimized" doesn't materially beat "baseline"
-out-of-sample, the lesson is that optimization is noise.
+The aggregate table answers "does optimization generalize?" — did picking-the-
+best-on-train actually beat picking-once-forever? If "optimized" doesn't
+materially beat "baseline" out-of-sample, the lesson is that optimization is
+noise.
+
+The per-symbol breakdown answers the strategy-centric question: **on which
+stocks does this strategy actually work?** If the strategy is consistently
+profitable on a subset of symbols and consistently loses on others, that's a
+real signal — and it's an input to the eventual per-stock strategy
+deployment pattern described in §1.5.
 
 ---
 
 ## 6. Out of scope (deliberately)
 
-- **Per-symbol param selection.** Universe-wide only. Per-symbol can be
-  added later by promoting `chosen_params_json` to a per-symbol mapping; we
-  don't pre-build for it.
+- **Per-symbol param selection inside a single WFO study.** Universe-wide
+  only. The grid picks one (fast, slow) per fold across all 51 symbols. Per-
+  symbol *param tuning* can be added later by promoting `chosen_params_json`
+  to a per-symbol mapping; we don't pre-build for it.
+
+  *Not* deferred: per-symbol *universes*. A strategy can already be run on a
+  one-symbol universe today (see §1.5 invariant 3). You can also run this
+  WFO harness with a one-symbol universe — pass `instrument_keys=[hdfcbank_key]`
+  and you get walk-forward validation for a single-stock strategy. The
+  harness doesn't care whether the universe is 1 or 51 symbols.
 - **Multiple strategies.** Only `EmaCrossover` in this iteration. Other
   strategies will get the same harness when they exist.
 - **Streamlit visualization.** Out of scope; that's roadmap item 3.
