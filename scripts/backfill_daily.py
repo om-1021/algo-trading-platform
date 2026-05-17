@@ -39,7 +39,7 @@ def _persist_instruments(symbol_to_key: dict[str, str]) -> None:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (instrument_key) DO UPDATE SET
               tradingsymbol = excluded.tradingsymbol,
-              updated_at = current_timestamp
+              updated_at = now()
             """,
             rows,
         )

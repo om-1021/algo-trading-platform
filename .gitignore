@@ -28,5 +28,5 @@ venv/
 /logs/
 *.log
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code: personal permissions/paths, not shared config
+.claude/

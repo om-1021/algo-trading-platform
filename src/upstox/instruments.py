@@ -61,15 +61,16 @@ def lookup_equity_keys(symbols: list[str]) -> dict[str, str]:
     Returns a dict; missing symbols are omitted and logged.
     """
     df = load_instrument_master()
-    # Filter to NSE cash equity. Upstox uses segment 'NSE_EQ' for cash.
-    if "segment" in df.columns:
-        eq = df[df["segment"] == "NSE_EQ"]
-    else:
-        eq = df
-    # 'tradingsymbol' is the human ticker like 'RELIANCE'
+    # NSE cash equity = exchange 'NSE_EQ' AND instrument_type 'EQUITY'.
+    # Without both filters the master also includes F&O options that share
+    # tradingsymbol prefixes (e.g. TATASTEEL26JUL205CE).
+    eq = df
+    if "exchange" in eq.columns:
+        eq = eq[eq["exchange"] == "NSE_EQ"]
+    if "instrument_type" in eq.columns:
+        eq = eq[eq["instrument_type"] == "EQUITY"]
     ts_col = "tradingsymbol" if "tradingsymbol" in eq.columns else "trading_symbol"
-    key_col = "instrument_key"
-    mapping = dict(zip(eq[ts_col].astype(str), eq[key_col].astype(str)))
+    mapping = dict(zip(eq[ts_col].astype(str), eq["instrument_key"].astype(str)))
     out: dict[str, str] = {}
     missing: list[str] = []
     for sym in symbols:
