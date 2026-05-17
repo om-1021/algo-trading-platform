@@ -1,0 +1,32 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Data (we don't commit market data or DB)
+/data/
+*.duckdb
+*.duckdb.wal
+*.csv
+*.csv.gz
+*.parquet
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs
+/logs/
+*.log
+
+# Claude Code local settings
+.claude/settings.local.json
