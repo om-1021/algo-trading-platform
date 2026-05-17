@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
@@ -34,16 +34,33 @@ DEFAULT_COST_BPS_PER_LEG = 7.5    # 0.075% — see docstring
 DEFAULT_CAPITAL_PER_TRADE = 10_000.0  # ₹ per position
 
 
-def _load_bars(instrument_key: str) -> pd.DataFrame:
+def _load_bars(
+    instrument_key: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> pd.DataFrame:
+    """Load daily bars for an instrument, optionally bounded by date.
+
+    Bounds are inclusive on both ends. None means no bound on that side.
+    """
+    clauses = ["instrument_key = ?"]
+    params: list = [instrument_key]
+    if from_date is not None:
+        clauses.append("bar_date >= ?")
+        params.append(from_date)
+    if to_date is not None:
+        clauses.append("bar_date <= ?")
+        params.append(to_date)
+    where = " AND ".join(clauses)
     with get_conn() as conn:
         df = conn.execute(
-            """
+            f"""
             SELECT bar_date, open, high, low, close, volume
             FROM market_bars_daily
-            WHERE instrument_key = ?
+            WHERE {where}
             ORDER BY bar_date
             """,
-            [instrument_key],
+            params,
         ).fetchdf()
     if df.empty:
         return df
@@ -188,32 +205,77 @@ def _summary(trades: list[dict], run_id: str) -> dict[str, Any]:
     }
 
 
-def run_backtest(
+def _backtest_window(
     strategy: SwingStrategy,
     instrument_keys: list[str],
+    from_date: date | None = None,
+    to_date: date | None = None,
     cost_bps_per_leg: float = DEFAULT_COST_BPS_PER_LEG,
     capital_per_trade: float = DEFAULT_CAPITAL_PER_TRADE,
+    persist: bool = True,
 ) -> dict[str, Any]:
-    """Run strategy over given universe, persist everything, return summary."""
-    run_id = _create_run(strategy)
-    logger.info("Run {} started — {} v{}", run_id, strategy.name, strategy.version)
+    """Run strategy on a date-bounded window across the given universe.
+
+    When persist=True: creates a fresh swing_strategy_runs row, writes
+    swing_signals and swing_trades, returns summary including run_id.
+
+    When persist=False: computes trades in memory only, returns summary
+    including the trade list. Used by walk-forward grid scoring so train-
+    window trades don't pollute the persisted strategy-run history.
+    """
+    run_id = _create_run(strategy) if persist else None
 
     all_signals: list[SwingSignal] = []
     for key in instrument_keys:
-        bars = _load_bars(key)
+        bars = _load_bars(key, from_date=from_date, to_date=to_date)
         if bars.empty:
-            logger.warning("No bars for {}", key)
+            logger.warning("No bars for {} in window {}..{}", key, from_date, to_date)
             continue
         sigs = strategy.generate_signals(bars, key)
         if sigs:
             logger.debug("  {} → {} signals", key, len(sigs))
         all_signals.extend(sigs)
 
-    sig_id_map = _persist_signals(run_id, all_signals)
+    if persist:
+        sig_id_map = _persist_signals(run_id, all_signals)
+    else:
+        # Fabricate signal ids in-memory so _pair_signals_into_trades has its mapping.
+        sig_id_map = {
+            (s.instrument_key, s.signal_ts): str(uuid.uuid4()) for s in all_signals
+        }
+
     trades = _pair_signals_into_trades(
-        run_id, all_signals, sig_id_map, cost_bps_per_leg, capital_per_trade,
+        run_id or "", all_signals, sig_id_map, cost_bps_per_leg, capital_per_trade,
     )
-    _persist_trades(trades)
-    summary = _summary(trades, run_id)
-    logger.success("Backtest complete: {}", summary)
+
+    if persist:
+        _persist_trades(trades)
+
+    summary = _summary(trades, run_id or "")
+    summary["trades_list"] = trades  # always include for caller use (WFO scoring)
+    if persist:
+        logger.success("Backtest complete: {}", {k: v for k, v in summary.items() if k != "trades_list"})
+    return summary
+
+
+def run_backtest(
+    strategy: SwingStrategy,
+    instrument_keys: list[str],
+    cost_bps_per_leg: float = DEFAULT_COST_BPS_PER_LEG,
+    capital_per_trade: float = DEFAULT_CAPITAL_PER_TRADE,
+) -> dict[str, Any]:
+    """Run strategy over full history of the given universe.
+
+    Backwards-compatible wrapper around _backtest_window. Existing callers
+    keep working without changes. The returned dict does NOT include the
+    in-memory trades_list — that's an internal detail.
+    """
+    summary = _backtest_window(
+        strategy, instrument_keys,
+        from_date=None, to_date=None,
+        cost_bps_per_leg=cost_bps_per_leg,
+        capital_per_trade=capital_per_trade,
+        persist=True,
+    )
+    summary.pop("trades_list", None)
     return summary
